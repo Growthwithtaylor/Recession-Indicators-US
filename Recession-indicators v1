@@ -1,0 +1,93 @@
+import requests
+import pandas as pd
+from datetime import datetime
+
+# Function to fetch data from FRED with error handling
+def fetch_fred_data(series_id, api_key):
+    url = f'https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={api_key}&file_type=json'
+    response = requests.get(url)
+
+    if response.status_code != 200:
+        print(f"Failed to fetch data for series ID: {series_id}. HTTP Status code: {response.status_code}")
+        return pd.DataFrame()  # Return an empty DataFrame if the request fails
+
+    data = response.json()
+
+    if 'observations' not in data:
+        print(f"No observations found for series ID: {series_id}")
+        return pd.DataFrame()  # Return an empty DataFrame if 'observations' key is missing
+
+    df = pd.DataFrame(data['observations'])
+    return df
+
+# Your FRED API key
+api_key = '472f551a2cfeb4f882b4e58fe70e950e'
+
+# Corrected Series IDs for the various indicators
+series_ids = {
+    '10yr_treasury': 'DGS10',
+    '2yr_treasury': 'DGS2',
+    'lei': 'USSLIND',
+    'unemployment_rate': 'UNRATE',
+    'initial_jobless_claims': 'ICSA',
+    'ism_manufacturing': 'PCUOMFGOMFG',  # Corrected series ID
+    'consumer_confidence': 'UMCSENT',    # University of Michigan Consumer Sentiment
+    'housing_starts': 'HOUST',
+    'corporate_earnings': 'CPATAX',
+    'credit_spreads': 'BAMLH0A0HYM2',
+    'loan_delinquencies': 'DRALACBS'     # Commercial bank delinquencies
+}
+
+# Fetch the data for each series
+dfs = {}
+for key, series_id in series_ids.items():
+    dfs[key] = fetch_fred_data(series_id, api_key)
+
+# Clean and Convert date column to datetime and value column to float
+for key, df in dfs.items():
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+        df['value'] = pd.to_numeric(df['value'], errors='coerce')  # Convert to numeric, coercing errors to NaN
+
+# Merge the Treasury Yield dataframes on the date
+if not dfs['10yr_treasury'].empty and not dfs['2yr_treasury'].empty:
+    merged_df = pd.merge(dfs['10yr_treasury'], dfs['2yr_treasury'], on='date', suffixes=('_10yr', '_2yr'))
+    merged_df['yield_spread'] = merged_df['value_10yr'] - merged_df['value_2yr']
+else:
+    merged_df = pd.DataFrame()  # Create an empty DataFrame if merging fails
+
+# Specify the file name
+file_name = 'economic_indicators.xlsx'
+
+# Load existing data if the file exists, otherwise start fresh
+try:
+    with pd.ExcelFile(file_name, engine='openpyxl') as xls:
+        sheets = {}
+        for sheet_name in xls.sheet_names:
+            sheets[sheet_name] = pd.read_excel(xls, sheet_name)
+
+        # Combine existing data with the new data
+        if not merged_df.empty:
+            combined_yield_df = pd.concat([sheets.get('Yield_Spread', pd.DataFrame()), merged_df]).drop_duplicates(subset=['date']).reset_index(drop=True)
+        else:
+            combined_yield_df = sheets.get('Yield_Spread', pd.DataFrame())
+
+        combined_dfs = {}
+        for key in series_ids:
+            sheet_name = key.replace('_', ' ').title()
+            if not dfs[key].empty:
+                combined_dfs[sheet_name] = pd.concat([sheets.get(sheet_name, pd.DataFrame()), dfs[key]]).drop_duplicates(subset=['date']).reset_index(drop=True)
+            else:
+                combined_dfs[sheet_name] = sheets.get(sheet_name, pd.DataFrame())
+
+except FileNotFoundError:
+    combined_yield_df = merged_df
+    combined_dfs = {key.replace('_', ' ').title(): dfs[key] for key in series_ids}
+
+# Write to Excel with separate sheets for each indicator
+with pd.ExcelWriter(file_name, engine='openpyxl', mode='w') as writer:
+    combined_yield_df.to_excel(writer, sheet_name='Yield_Spread', index=False)
+    for sheet_name, combined_df in combined_dfs.items():
+        combined_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+print(f"Economic indicators data has been updated. Last update: {datetime.now()}")
